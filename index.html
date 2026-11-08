@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Görünmez Karakter Temizleyici</title>
+  <style>
+    :root { --bg:#f7f7f5; --fg:#1d1d1b; --kart:#fff; --cizgi:#d9d9d4; --vurgu:#2f6f4f; --uyari:#a4461f; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#1a1a19; --fg:#ececea; --kart:#242423; --cizgi:#3a3a38; --vurgu:#6cbf92; --uyari:#e58a63; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+    main { max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    p.alt { margin: 0 0 20px; opacity: .75; }
+    label { font-weight: 600; display:block; margin: 16px 0 6px; }
+    textarea { width:100%; min-height: 180px; padding: 12px; border:1px solid var(--cizgi); border-radius: 8px;
+               background: var(--kart); color: var(--fg); font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
+    .dugmeler { display:flex; flex-wrap:wrap; gap:8px; margin-top: 12px; align-items:center; }
+    button { padding: 10px 16px; border-radius: 8px; border: 1px solid var(--cizgi); background: var(--kart);
+             color: var(--fg); font: inherit; cursor: pointer; }
+    button.ana { background: var(--vurgu); border-color: var(--vurgu); color: #fff; }
+    .secenek { font-weight: 400; display:inline-flex; gap:6px; align-items:center; margin:0 0 0 4px; }
+    #rapor { margin-top: 16px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--cizgi); background: var(--kart); }
+    #rapor.temiz { border-color: var(--vurgu); }
+    #rapor.kirli { border-color: var(--uyari); }
+    #rapor table { width:100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
+    #rapor td, #rapor th { text-align:left; padding: 4px 6px; border-bottom: 1px solid var(--cizgi); }
+    .kod { font-family: ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
+    .bilgi { opacity:.7; font-size: 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Görünmez Karakter Temizleyici</h1>
+  <p class="alt">Metni yapıştırın. Gizli/görünmez Unicode karakterleri bulunur, listelenir ve temizlenir. Metin bilgisayarınızdan dışarı gönderilmez.</p>
+
+  <label for="girdi">Metin</label>
+  <textarea id="girdi" placeholder="Metni buraya yapıştırın..."></textarea>
+
+  <div class="dugmeler">
+    <button class="ana" id="temizleBtn">Tara ve temizle</button>
+    <label class="secenek"><input type="checkbox" id="emojiKoru" checked> Emojileri koru</label>
+  </div>
+
+  <div id="rapor" hidden></div>
+
+  <label for="cikti">Temiz metin</label>
+  <textarea id="cikti" readonly placeholder="Temizlenmiş metin burada görünecek"></textarea>
+  <div class="dugmeler">
+    <button id="kopyalaBtn">Temiz metni kopyala</button>
+    <span id="kopyaDurum" class="bilgi"></span>
+  </div>
+</main>
+
+<script src="app.js"></script>
+<script>
+  (function () {
+    var girdi = document.getElementById('girdi');
+    var cikti = document.getElementById('cikti');
+    var rapor = document.getElementById('rapor');
+    var emojiKoru = document.getElementById('emojiKoru');
+    var kopyaDurum = document.getElementById('kopyaDurum');
+
+    function kacis(s) {
+      return String(s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    function calistir() {
+      var sonuc = GorunmezTemizleyici.temizle(girdi.value, { emojiKoru: emojiKoru.checked });
+      cikti.value = sonuc.temiz;
+      rapor.hidden = false;
+      if (sonuc.toplam === 0) {
+        rapor.className = 'temiz';
+        rapor.innerHTML = '<strong>Görünmez veya olağandışı karakter bulunamadı.</strong> Metin temiz.';
+        return;
+      }
+      rapor.className = 'kirli';
+      var html = '<strong>' + sonuc.toplam + ' görünmez/olağandışı karakter bulundu ve temizlendi.</strong>' +
+        '<table><thead><tr><th>Kod</th><th>Karakter</th><th>Adet</th></tr></thead><tbody>';
+      sonuc.ozet.forEach(function (o) {
+        html += '<tr><td class="kod">' + kacis(o.kod) + '</td><td>' + kacis(o.ad) + '</td><td>' + o.adet + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      var ilk = sonuc.bulunanlar.slice(0, 50).map(function (b) {
+        return b.satir + ':' + b.sutun + ' ' + b.kod;
+      }).join(', ');
+      html += '<p class="bilgi">Konumlar (satır:sütun): ' + kacis(ilk) +
+        (sonuc.bulunanlar.length > 50 ? ' …' : '') + '</p>';
+      rapor.innerHTML = html;
+    }
+
+    document.getElementById('temizleBtn').addEventListener('click', calistir);
+    emojiKoru.addEventListener('change', function () { if (!rapor.hidden) calistir(); });
+
+    document.getElementById('kopyalaBtn').addEventListener('click', function () {
+      if (!cikti.value) return;
+      var bitti = function () { kopyaDurum.textContent = 'Kopyalandı.'; setTimeout(function () { kopyaDurum.textContent = ''; }, 2000); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cikti.value).then(bitti, function () { cikti.select(); document.execCommand('copy'); bitti(); });
+      } else {
+        cikti.select(); document.execCommand('copy'); bitti();
+      }
+    });
+  })();
+</script>
+</body>
+</html>
