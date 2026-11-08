@@ -1,0 +1,32 @@
+#!/bin/sh
+# Commit adımı: commit'e girecek dosyalarda gizli/görünmez karakter varsa commit'i durdurur.
+# Etkinleştirmek için (bir kez): git config core.hooksPath .githooks
+# Otomatik temizlemek için:     node app.js --yerinde <dosya...>  ve ardından git add
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Uyarı: node bulunamadı, gizli karakter kontrolü atlandı." >&2
+  exit 0
+fi
+
+kok=$(git rev-parse --show-toplevel) || exit 1
+gecici=$(mktemp -d) || exit 1
+trap 'rm -rf "$gecici"' EXIT
+
+# Çalışma dizinini değil, stage edilmiş (commit'e girecek) içeriği kontrol et
+git diff --cached --name-only --diff-filter=ACMR > "$gecici/.liste" || exit 1
+[ -s "$gecici/.liste" ] || exit 0
+
+while IFS= read -r f; do
+  mkdir -p "$gecici/$(dirname "$f")"
+  git show ":$f" > "$gecici/$f"
+done < "$gecici/.liste"
+
+cd "$gecici" || exit 1
+tr '\n' '\0' < .liste | xargs -0 node "$kok/app.js" --kontrol
+if [ $? -ne 0 ]; then
+  echo "" >&2
+  echo "Commit durduruldu: yukarıdaki dosyalarda gizli/görünmez karakter var." >&2
+  echo "Temizlemek için: node app.js --yerinde <dosya...>  ve ardından git add" >&2
+  exit 1
+fi
+exit 0

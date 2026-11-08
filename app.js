@@ -12,7 +12,13 @@
 //   node app.js --rapor dosya.txt        -> yalnızca rapor, metin yazılmaz
 //   cat dosya.txt | node app.js          -> standart girdiden okur
 //
-// Kullanım (tarayıcı): index.html dosyasını açın.
+//   node app.js --kontrol a.txt b.md     -> birden çok dosyayı kontrol eder
+//
+// Kullanım (tarayıcı): index.html dosyasını açın. app.js'i yükleyen her sayfada
+// otomatik koruma çalışır (yapıştırma, yazma, kopyalama ve sayfa metinleri).
+//
+// Depo koruması: .githooks/pre-commit (commit adımı) ve
+// .github/workflows/gizli-karakter.yml (push / pull request adımı).
 
 (function (root) {
   'use strict';
@@ -157,7 +163,7 @@
         var sonraki = karakterler[i + 1] || '';
         if (kp === 0xFE0F && (EMOJI.test(onceki) || /^[0-9#*]$/.test(onceki))) yap = null;
         if (kp === 0x200D && EMOJI_DEVAMI.test(onceki.length ? onceki : ' ') && EMOJI.test(sonraki)) yap = null;
-        if (kp === 0x200D && (karakterler[i - 1] === '️') && EMOJI.test(sonraki)) yap = null;
+        if (kp === 0x200D && (karakterler[i - 1] === '\uFE0F') && EMOJI.test(sonraki)) yap = null;
         // Bayrak etiket dizileri (ör. İskoçya bayrağı) için etiket karakterleri
         if (kp >= 0xE0020 && kp <= 0xE007F) {
           var j = i - 1;
@@ -222,11 +228,200 @@
     root.GorunmezTemizleyici = api;
   }
 
+  // ---- Tarayıcı: sayfa genelinde otomatik koruma ----
+  //
+  // app.js'i yükleyen her sayfada kendiliğinden çalışır:
+  //   - Yapıştırma ve sürükle-bırak: gelen metin temizlenerek eklenir.
+  //   - Yazma / otomatik doldurma: giriş alanlarındaki gizli karakterler anında silinir.
+  //   - Kopyalama ve kesme: panoya her zaman temiz metin gider.
+  //   - Sayfadaki yazılar: sayfada görünen metinlerdeki gizli karakterler temizlenir
+  //     (sonradan eklenen içerik dahil).
+  // Temizleme olduğunda ilgili öğede 'gizlikarakter' olayı tetiklenir (detail = sonuç).
+  // Bir sayfada kapatmak için: <html data-koruma="kapali">
+  function sayfaKorumasiKur(doc) {
+    var win = doc.defaultView || root;
+    if (doc.documentElement.getAttribute('data-koruma') === 'kapali') return;
+    if (doc.__gizliKarakterKorumasi) return;
+    doc.__gizliKarakterKorumasi = true;
+
+    var METIN_TURLERI = /^(text|search|url|tel|email|password|)$/i;
+
+    function metinAlani(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.tagName === 'TEXTAREA') return true;
+      if (el.tagName === 'INPUT') return METIN_TURLERI.test(el.type || '');
+      return false;
+    }
+
+    function duzenlenebilir(el) {
+      while (el && el.nodeType !== 1) el = el.parentNode;
+      return !!(el && el.isContentEditable);
+    }
+
+    function bildir(el, sonuc) {
+      if (!sonuc || sonuc.toplam === 0) return;
+      var hedef = el && el.dispatchEvent ? el : doc;
+      var olay;
+      try {
+        olay = new win.CustomEvent('gizlikarakter', { bubbles: true, detail: sonuc });
+      } catch (e) {
+        olay = doc.createEvent('CustomEvent');
+        olay.initCustomEvent('gizlikarakter', true, false, sonuc);
+      }
+      hedef.dispatchEvent(olay);
+    }
+
+    function alanaEkle(el, metin) {
+      var bas = el.selectionStart, son = el.selectionEnd;
+      if (typeof bas !== 'number') {
+        el.value += metin;
+      } else if (el.setRangeText) {
+        el.setRangeText(metin, bas, son, 'end');
+      } else {
+        el.value = el.value.slice(0, bas) + metin + el.value.slice(son);
+        el.selectionStart = el.selectionEnd = bas + metin.length;
+      }
+      el.dispatchEvent(new win.Event('input', { bubbles: true }));
+    }
+
+    function duzenlenebilireEkle(metin) {
+      if (doc.queryCommandSupported && doc.queryCommandSupported('insertText')) {
+        doc.execCommand('insertText', false, metin);
+        return;
+      }
+      var sec = win.getSelection();
+      if (!sec || !sec.rangeCount) return;
+      var aralik = sec.getRangeAt(0);
+      aralik.deleteContents();
+      var dugum = doc.createTextNode(metin);
+      aralik.insertNode(dugum);
+      aralik.setStartAfter(dugum);
+      aralik.collapse(true);
+      sec.removeAllRanges();
+      sec.addRange(aralik);
+    }
+
+    // Yapıştırma ve sürükle-bırak
+    function gelenMetin(e, veri) {
+      var el = e.target;
+      if (!veri || !(metinAlani(el) || duzenlenebilir(el))) return;
+      var ham = veri.getData('text/plain');
+      if (!ham) return;
+      var sonuc = temizle(ham);
+      if (sonuc.toplam === 0) return;
+      e.preventDefault();
+      if (metinAlani(el)) {
+        if (e.type === 'drop') el.focus();
+        alanaEkle(el, sonuc.temiz);
+      } else {
+        duzenlenebilireEkle(sonuc.temiz);
+      }
+      bildir(el, sonuc);
+    }
+    doc.addEventListener('paste', function (e) { gelenMetin(e, e.clipboardData || win.clipboardData); }, true);
+    doc.addEventListener('drop', function (e) { gelenMetin(e, e.dataTransfer); }, true);
+
+    // Yazma, otomatik doldurma, tahmin vb. ile gelen karakterler
+    doc.addEventListener('input', function (e) {
+      var el = e.target;
+      if (e.isComposing || !metinAlani(el)) return;
+      var sonuc = temizle(el.value);
+      if (sonuc.toplam === 0) return;
+      var imlec = el.selectionEnd;
+      var onceki = typeof imlec === 'number' ? temizle(el.value.slice(0, imlec)).temiz.length : null;
+      el.value = sonuc.temiz;
+      if (onceki !== null) {
+        try { el.selectionStart = el.selectionEnd = onceki; } catch (_) { /* bazı türler imleç desteklemez */ }
+      }
+      bildir(el, sonuc);
+    }, true);
+    doc.addEventListener('compositionend', function (e) {
+      if (metinAlani(e.target)) e.target.dispatchEvent(new win.Event('input', { bubbles: true }));
+    }, true);
+
+    // Kopyalama ve kesme: panoya her zaman temiz metin
+    function giden(e) {
+      if (!e.clipboardData) return;
+      var el = doc.activeElement;
+      var secili, alanda = metinAlani(el) && typeof el.selectionStart === 'number';
+      if (alanda) {
+        secili = el.value.slice(el.selectionStart, el.selectionEnd);
+      } else {
+        var sec = win.getSelection();
+        secili = sec ? sec.toString() : '';
+      }
+      if (!secili) return;
+      var sonuc = temizle(secili);
+      if (sonuc.toplam === 0) return;
+      e.preventDefault();
+      e.clipboardData.setData('text/plain', sonuc.temiz);
+      if (e.type === 'cut') {
+        if (alanda && !el.readOnly) alanaEkle(el, '');
+        else if (duzenlenebilir(e.target)) duzenlenebilireEkle('');
+      }
+      bildir(alanda ? el : e.target, sonuc);
+    }
+    doc.addEventListener('copy', giden, true);
+    doc.addEventListener('cut', giden, true);
+
+    // Sayfada görünen metinler
+    var ATLA = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, TEXTAREA: 1 };
+    function dugumTemizle(dugum) {
+      if (dugum.nodeType === 3) {
+        var ust = dugum.parentNode;
+        if (!ust || ATLA[ust.nodeName] || ust.isContentEditable) return;
+        var sonuc = temizle(dugum.nodeValue);
+        if (sonuc.toplam > 0) dugum.nodeValue = sonuc.temiz;
+        return;
+      }
+      if (dugum.nodeType !== 1 || ATLA[dugum.nodeName]) return;
+      ['title', 'alt', 'placeholder', 'aria-label'].forEach(function (ad) {
+        var v = dugum.getAttribute(ad);
+        if (v) {
+          var s = temizle(v);
+          if (s.toplam > 0) dugum.setAttribute(ad, s.temiz);
+        }
+      });
+      if (metinAlani(dugum) && dugum.value) {
+        var d = temizle(dugum.value);
+        if (d.toplam > 0) dugum.value = d.temiz;
+      }
+      for (var c = dugum.firstChild; c; c = c.nextSibling) dugumTemizle(c);
+    }
+
+    function baslat() {
+      if (doc.title) {
+        var b = temizle(doc.title);
+        if (b.toplam > 0) doc.title = b.temiz;
+      }
+      dugumTemizle(doc.body || doc.documentElement);
+      if (win.MutationObserver) {
+        new win.MutationObserver(function (kayitlar) {
+          kayitlar.forEach(function (k) {
+            if (k.type === 'characterData') dugumTemizle(k.target);
+            else if (k.type === 'attributes') dugumTemizle(k.target);
+            else for (var i = 0; i < k.addedNodes.length; i++) dugumTemizle(k.addedNodes[i]);
+          });
+        }).observe(doc.documentElement, {
+          childList: true, subtree: true, characterData: true,
+          attributes: true, attributeFilter: ['title', 'alt', 'placeholder', 'aria-label']
+        });
+      }
+    }
+    if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', baslat);
+    else baslat();
+  }
+
+  api.sayfaKorumasiKur = sayfaKorumasiKur;
+  if (typeof document !== 'undefined' && document.documentElement) {
+    sayfaKorumasiKur(document);
+  }
+
   // ---- Komut satırı ----
   if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {
     var fs = require('fs');
     var argv = process.argv.slice(2);
-    var girdi = null;
+    var girdiler = [];
     var cikis = null;
     var yerinde = false;
     var yalnizRapor = false;
@@ -236,24 +431,49 @@
       var arg = argv[a];
       if (arg === '-o' || arg === '--cikti') cikis = argv[++a];
       else if (arg === '--yerinde') yerinde = true;
-      else if (arg === '--rapor') yalnizRapor = true;
+      else if (arg === '--rapor' || arg === '--kontrol') yalnizRapor = true;
       else if (arg === '--emojileri-de-temizle') emojiKoru = false;
       else if (arg === '-h' || arg === '--yardim') {
         console.log([
-          'Kullanım: node app.js [dosya] [seçenekler]',
+          'Kullanım: node app.js [dosya...] [seçenekler]',
           '',
-          '  -o, --cikti <dosya>       Temiz metni bu dosyaya yaz',
-          '  --yerinde                 Girdi dosyasının kendisini temizle',
-          '  --rapor                   Yalnızca raporu göster',
+          '  -o, --cikti <dosya>       Temiz metni bu dosyaya yaz (tek dosyada)',
+          '  --yerinde                 Verilen dosyaların kendisini temizle',
+          '  --rapor, --kontrol        Yalnızca kontrol et; bulunursa çıkış kodu 1',
           '  --emojileri-de-temizle    Emoji içindeki ZWJ / U+FE0F karakterlerini de sil',
           '  -h, --yardim              Bu yardımı göster',
           '',
-          'Dosya verilmezse standart girdiden okunur.'
+          'Dosya verilmezse standart girdiden okunur.',
+          'İkili (binary) dosyalar atlanır.'
         ].join('\n'));
         process.exit(0);
-      } else girdi = arg;
+      } else girdiler.push(arg);
     }
 
+    if (girdiler.length > 1 || (girdiler.length === 1 && (yalnizRapor || yerinde) && !cikis)) {
+      // Çoklu dosya / kontrol modu
+      if (!yalnizRapor && !yerinde) {
+        process.stderr.write('Hata: birden fazla dosyada --kontrol veya --yerinde kullanın.\n');
+        process.exit(2);
+      }
+      var kirli = 0;
+      girdiler.forEach(function (yol) {
+        var tampon = fs.readFileSync(yol);
+        if (tampon.indexOf(0) !== -1) return; // ikili dosya
+        var s = temizle(tampon.toString('utf8'), { emojiKoru: emojiKoru });
+        if (s.toplam === 0) return;
+        kirli++;
+        process.stderr.write('\n== ' + yol + ' ==\n' + raporMetni(s) + '\n');
+        if (yerinde) {
+          fs.writeFileSync(yol, s.temiz, 'utf8');
+          process.stderr.write('Dosya temizlendi: ' + yol + '\n');
+        }
+      });
+      if (kirli === 0) process.stderr.write('Görünmez veya olağandışı karakter bulunamadı. Tüm dosyalar temiz.\n');
+      process.exit(kirli > 0 && !yerinde ? 1 : 0);
+    }
+
+    var girdi = girdiler[0];
     var metin = girdi ? fs.readFileSync(girdi, 'utf8') : fs.readFileSync(0, 'utf8');
     var sonuc = temizle(metin, { emojiKoru: emojiKoru });
 
@@ -263,13 +483,10 @@
       process.exit(sonuc.toplam > 0 ? 1 : 0);
     }
     if (yerinde) {
-      if (!girdi) {
-        process.stderr.write('Hata: --yerinde için bir dosya adı verin.\n');
-        process.exit(2);
-      }
-      fs.writeFileSync(girdi, sonuc.temiz, 'utf8');
-      process.stderr.write('Dosya temizlendi: ' + girdi + '\n');
-    } else if (cikis) {
+      process.stderr.write('Hata: --yerinde için bir dosya adı verin.\n');
+      process.exit(2);
+    }
+    if (cikis) {
       fs.writeFileSync(cikis, sonuc.temiz, 'utf8');
       process.stderr.write('Temiz metin yazıldı: ' + cikis + '\n');
     } else {

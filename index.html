@@ -34,7 +34,7 @@
 <body>
 <main>
   <h1>Görünmez Karakter Temizleyici</h1>
-  <p class="alt">Metni yapıştırın. Gizli/görünmez Unicode karakterleri bulunur, listelenir ve temizlenir. Metin bilgisayarınızdan dışarı gönderilmez.</p>
+  <p class="alt">Metni yapıştırın. Gizli/görünmez Unicode karakterleri bulunur, listelenir ve temizlenir. Metin bilgisayarınızdan dışarı gönderilmez. Bu sayfada yapıştırılan, yazılan ve kopyalanan her metin otomatik olarak temizlenir.</p>
 
   <label for="girdi">Metin</label>
   <textarea id="girdi" placeholder="Metni buraya yapıştırın..."></textarea>
@@ -69,8 +69,38 @@
       });
     }
 
+    // Sayfa koruması yapıştırılan metni otomatik temizler; temizlenenleri burada gösteririz.
+    var otomatikTemizlenen = null;
+    girdi.addEventListener('gizlikarakter', function (e) {
+      var s = e.detail;
+      if (!otomatikTemizlenen) {
+        otomatikTemizlenen = s;
+      } else {
+        var birlesik = {};
+        otomatikTemizlenen.ozet.concat(s.ozet).forEach(function (o) {
+          if (!birlesik[o.kod]) birlesik[o.kod] = { kod: o.kod, ad: o.ad, adet: 0 };
+          birlesik[o.kod].adet += o.adet;
+        });
+        otomatikTemizlenen = {
+          toplam: otomatikTemizlenen.toplam + s.toplam,
+          bulunanlar: otomatikTemizlenen.bulunanlar.concat(s.bulunanlar),
+          ozet: Object.keys(birlesik).map(function (k) { return birlesik[k]; })
+        };
+      }
+      calistir();
+    });
+
     function calistir() {
       var sonuc = GorunmezTemizleyici.temizle(girdi.value, { emojiKoru: emojiKoru.checked });
+      if (otomatikTemizlenen) {
+        var o = otomatikTemizlenen;
+        sonuc = {
+          temiz: sonuc.temiz,
+          toplam: o.toplam + sonuc.toplam,
+          bulunanlar: o.bulunanlar.concat(sonuc.bulunanlar),
+          ozet: o.ozet.concat(sonuc.ozet)
+        };
+      }
       cikti.value = sonuc.temiz;
       rapor.hidden = false;
       if (sonuc.toplam === 0) {
@@ -94,6 +124,7 @@
     }
 
     document.getElementById('temizleBtn').addEventListener('click', calistir);
+    girdi.addEventListener('input', function () { if (!girdi.value) otomatikTemizlenen = null; });
     emojiKoru.addEventListener('change', function () { if (!rapor.hidden) calistir(); });
 
     document.getElementById('kopyalaBtn').addEventListener('click', function () {
